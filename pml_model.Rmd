@@ -1,0 +1,142 @@
+---
+title: "Practical Machine Learning: Course Project"
+author: "Mark Jones"
+date: "June 14, 2015"
+output: html_document
+---
+## Summary
+
+We constructed a prediction mechanism using machine learning techniques to predict whether a dumbbell has been lifted in one of five different ways based upon accelerometer readings. The accelerometer readings were collected at various slices of time as each participant performed the lift correctly one time and additionally, in four, well-defined, incorrect manners.  This data was used to train and cross validate a gradient-boosted machine against eighty percent of the data set and the final result was tested against the remaining hold-out of twenty percent to arrive at an expected out-of-sample error rate of approximately two percent based upon accuracy of approximately ninety-eight percent.
+
+## Data Preparation
+
+### Data Import
+We have downloaded the data file from the link on the Coursera github page and placed it into our working directory. The **training*** and ***test*** .csv files are imported and converted into data tables.
+
+```{r,echo=TRUE,cache=TRUE}
+library(readr)
+library(data.table)
+train<-read_csv("pml-training.csv",)
+train<-data.table(train)
+test<-read_csv("pml-testing.csv",)
+test<-data.table(test)
+```
+
+### Data Clean
+We measure the number of observations in the train data set and apply an NA count to all of the columns in the data frame.  The resulting data table contains the percentage of observations that are NA by column.  Upon inspection, we recongize that several columns have either a very large percentage of NA values or none at all.  We decide to eliminate any columns with a large percentage of NA.
+
+```{r,echo=TRUE,cache=TRUE}
+data.length<-nrow(train)
+data.na<-data.table(apply(train,2,function(x) sum(is.na(x))/data.length))
+data.delete<-data.na[V1>0,.N]
+column.index<-c()
+for (i in 1:ncol(train)) {
+    if (data.na[i,V1]==0) column.index<-c(column.index,i)
+}
+train<-train[,column.index,with=FALSE]
+```
+
+We recognize also that some columns have imported with blanks instead of NA's for missings. They all occur in columns with names including the phrase ***skewness*** or ***kurtosis***, so we eliminate these as well. We are left with a data set containing no missings of any kind.  Additionally, we delete the first seven column that include identifying information that we would not want to include in the model. Note that we also make the same adjustments to the test set, although this may not have been necessary.
+
+```{r,echo=TRUE,cache=TRUE}
+col.delete<-grep("^skewness|^kurtosis",colnames(train))
+train<-train[,-col.delete,with=FALSE]
+train<-train[,-c(1:7),with=FALSE]
+test<-test[,column.index,with=FALSE]
+test<-test[,-col.delete,with=FALSE]
+test<-test[,-c(1:7),with=FALSE]
+```
+
+### Create Training and Validation Sets
+
+We use the caret functionality to split our data set into an eighty percent training set and a twenty percenter validation set.  Additionally we convert the target column to a factor type for both the train and validate data sets.  Although we will not ever look at the validation set until we use it for testing at the end of model development.  Additionally, we convert all columns in the training and validate data sets into numeric quantities in matrices since it appears that is the appropriate format for plugging them into the gradient-boosted machine methodology that we will use later.
+
+```{r,echo=TRUE,cache=TRUE}
+library(caret)
+set.seed(1729)
+train.dp<-createDataPartition(train$classe,p=.8,list=FALSE)
+train<-data.frame(train)
+train.data<-train[train.dp,]
+train.data$classe<-factor(train.data$classe)
+train.data.num<-apply(train.data[,-53],c(1,2),as.numeric)
+validate.data<-train[-train.dp,]
+validate.data$classe<-factor(validate.data$classe)
+validate.data.num<-apply(validate.data[,-53],c(1,2),as.numeric)
+test.data<-data.frame(test)
+test.data.num<-apply(test.data[,-53],c(1,2),as.numeric)
+```
+
+## Model Building
+
+### Sampling
+This model takes too long to run on our hardware and we found good results simply by randomly sampling the data.  Five thousand observations seemed to work fine and didn't take too long to run.  Therefore, we use the sample function to build a set of training independent variables and responses to plug into our model. 
+
+```{r,echo=TRUE,cache=TRUE}
+sample.train.rows<-sample(nrow(train.data.num),5000)
+train.covariates<-train.data.num[sample.train.rows,]
+train.response<-train.data[sample.train.rows,53]
+```
+
+### Model Specification
+
+After some iteration to limit the run time, we settled on the following tuning parameters to determine the optimal model.  The ***gbm*** method in caret uses four different tuning parameters that are defined in the help file for the ***gbm*** package.
+
+```{r,echo=TRUE,cache=TRUE}
+gbmGrid<-expand.grid(.interaction.depth=seq(1,5,by=2),
+                        .n.trees=seq(200,400,by=100),
+                        .shrinkage=.1,
+                     .n.minobsinnode=seq(30,50,by=10))
+```
+
+We decided to do repeated cross validation with five folds and three repeats in order to deal with the relatively small number of observations utilized.  We also enabled parallel processing to speed things up.
+
+```{r,echo=TRUE,cache=TRUE}
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 5,
+                           repeats = 3,
+                           returnResamp="all",
+                           classProbs = TRUE,
+                           allowParallel=TRUE)
+
+library(doParallel)
+cl <- makePSOCKcluster(3)
+registerDoParallel(cl)
+gbm.fit<-train(train.covariates,train.response,method="gbm", trControl = fitControl, tuneGrid=gbmGrid)
+stopCluster(cl)
+```
+
+## Model Fit
+
+We didn't fit any other models since it didn't seem necessary.  The results of the fit produced almost a ninety-eight percent level of accuracy for the maximum level of kappa.  Of course this was on the training data, so we still need to check the out-of-sample accuracy on the validation set.  We examined several other plots to evaluate the fit of the model and results of tuning.  We found no errors of concern.
+
+```{r,echo=TRUE,cache=TRUE}
+gbm.fit
+plot(gbm.fit)
+plot(gbm.fit,metric="Kappa")
+plot(gbm.fit,plottype="level")
+resampleHist(gbm.fit)
+```
+
+We predict the values on the validation set and calculate the confusion matrix to gauge the out-of-sample accuracy.  The results are approximately ninety-eight percent accuracy.  Which isn't amazing given the nature of the data set and test set. 
+
+```{r,echo=TRUE,cache=TRUE}
+predict.values<-predict(gbm.fit,newdata=validate.data.num)
+confusionMatrix(predict.values,validate.data[,53])
+```
+
+### Submission Output
+
+We follow the advice in the instructions and output twenty separate text files with the result of our predictions on the submission set.  The result is one hundred percent accuracy.
+
+```{r,echo=TRUE,cache=TRUE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+predict.test<-as.character(predict(gbm.fit,newdata=test.data.num))
+pml_write_files(predict.test)
+```
